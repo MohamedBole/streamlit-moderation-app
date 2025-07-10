@@ -1,0 +1,9 @@
+
+streamlit
+transformers
+accelerate
+peft
+requests
+langchain-openai
+torch
+Pillow

@@ -1,9 +1,9 @@
-
 streamlit
 transformers
 accelerate
 peft
 requests
 langchain-openai
+langchain  # <--- ADD THIS LINE
 torch
 Pillow

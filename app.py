@@ -4,6 +4,8 @@ import json
 import torch
 import streamlit as st
 from PIL import Image # For image processing
+# Removed: from google.colab import userdata # Not available on Streamlit Community Cloud
+# Removed: from google.colab import drive # Not available on Streamlit Community Cloud
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification, BlipProcessor, BlipForConditionalGeneration
 from peft import PeftModel
 from langchain_openai import ChatOpenAI
@@ -14,42 +16,36 @@ from typing import Dict, Any
 
 # --- Configuration and Setup ---
 
-# Mount Google Drive (if not already mounted)
-# This is crucial for loading your fine-tuned model
-try:
-    from google.colab import drive
-    drive.mount('/content/drive')
-    st.success("Google Drive mounted successfully.")
-except Exception as e:
-    st.warning(f"Could not mount Google Drive (might be already mounted or error): {e}")
-
 # Define the device for PyTorch models
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 st.info(f"Using device: {device}")
 
-# Define the path where you saved the fine-tuned DistilBert model
-# IMPORTANT: Adjust these paths if your models are saved elsewhere in Google Drive
-model_path = '/content/drive/MyDrive/lora_distilbert_results/lora_adapters'
-tokenizer_path = '/content/drive/MyDrive/fine_tuned_distilbert'
-
 # --- Load Fine-tuned DistilBert Model (Soft Classifier) ---
+# IMPORTANT: You MUST replace these placeholders with the actual Hugging Face Model IDs
+# where you have uploaded your fine-tuned model and tokenizer.
+# Example: "your-huggingface-username/my-fine-tuned-distilbert-lora"
+FINE_TUNED_MODEL_ID = "your-huggingface-org/your-fine-tuned-distilbert-model" # <<< REPLACE THIS PLACEHOLDER
+FINE_TUNED_TOKENIZER_ID = "your-huggingface-org/your-fine-tuned-distilbert-tokenizer" # <<< REPLACE THIS PLACEHOLDER (often same as base model or fine-tuned model)
+
 @st.cache_resource # Cache the model loading for performance
 def load_soft_classifier_model():
     st.write("Loading soft classifier model (DistilBert)... This may take a moment.")
     try:
-        tokenizer = DistilBertTokenizer.from_pretrained(tokenizer_path)
+        # Load tokenizer from Hugging Face Model Hub
+        tokenizer = DistilBertTokenizer.from_pretrained(FINE_TUNED_TOKENIZER_ID)
         num_labels = 9 # Adjust this if your number of classes is different
         base_model = DistilBertForSequenceClassification.from_pretrained(
-            'distilbert-base-uncased',
+            'distilbert-base-uncased', # Load the original base model first
             num_labels=num_labels
         )
-        model = PeftModel.from_pretrained(base_model, model_path)
+        # Load the PEFT (LoRA) adapters onto the base model from Hugging Face Model Hub
+        model = PeftModel.from_pretrained(base_model, FINE_TUNED_MODEL_ID)
         model.to(device)
         model.eval()
         st.success("Soft classifier model and tokenizer loaded successfully!")
         return tokenizer, model
     except Exception as e:
-        st.error(f"Error loading soft classifier model: {e}")
+        st.error(f"Error loading soft classifier model. Please ensure '{FINE_TUNED_MODEL_ID}' and '{FINE_TUNED_TOKENIZER_ID}' are correct and accessible on Hugging Face Model Hub, or adjust paths if models are in your repo: {e}")
         st.stop() # Stop Streamlit app if model cannot be loaded
 
 tokenizer, soft_classifier_model = load_soft_classifier_model()
@@ -87,17 +83,22 @@ blip_processor, blip_model = load_blip_model()
 
 # --- API Key Setup (for OpenRouter) ---
 
-# Retrieve API Keys from Colab Secrets
+# Retrieve API Keys from Streamlit Secrets
+# Use st.secrets["KEY_NAME"] for direct access, or st.secrets.get("KEY_NAME", default_value)
 try:
-    openrouter_api_key = st.secrets.get()("OPENROUTER_API_KEY")
+    openrouter_api_key = st.secrets["OPENROUTER_API_KEY"]
     # It's crucial to strip any whitespace/newline characters that might be appended
     os.environ["OPENROUTER_API_KEY"] = openrouter_api_key.strip()
-    st.success("OpenRouter API Key loaded from Colab Secrets.")
-except Exception as e:
-    st.error(f"Error loading OPENROUTER_API_KEY from Colab Secrets: {e}. Please ensure it's set correctly.")
+    st.success("OpenRouter API Key loaded from Streamlit Secrets.")
+except KeyError:
+    st.error("`OPENROUTER_API_KEY` not found in Streamlit Secrets. Please add it to your app's secrets.")
     st.stop()
 
 os.environ["OPENROUTER_BASE_URL"] = "https://openrouter.ai/api/v1" # Standard OpenRouter base URL
+# Optional: Set these for OpenRouter analytics if you have a site URL/name
+# Use .get() with a default value to prevent errors if secrets are not set
+os.environ["YOUR_SITE_URL"] = st.secrets.get("YOUR_SITE_URL", "https://streamlit.app") # Default for Streamlit Cloud
+os.environ["YOUR_SITE_NAME"] = st.secrets.get("YOUR_SITE_NAME", "Streamlit Moderation App")
 
 
 # --- Common LLM Initialization Function for OpenRouter ---
@@ -148,9 +149,6 @@ def call_llama_guard_api(text: str) -> Dict[str, Any]:
         response.raise_for_status()
         response_json = response.json()
 
-        # Debugging: Print raw response to understand its structure
-        # st.json(response_json)
-
         guard_output = response_json.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
         if guard_output.lower().startswith("unsafe"):
@@ -159,7 +157,6 @@ def call_llama_guard_api(text: str) -> Dict[str, Any]:
         elif guard_output.lower().startswith("safe"):
             return {"flagged": False, "category": "Llama Guard: Safe"}
         else:
-            # If the output is empty or not "safe"/"unsafe", treat as flagged for safety
             return {"flagged": True, "category": f"Llama Guard: Unexpected output - '{guard_output}' (Raw: {response_json})"}
 
     except requests.exceptions.RequestException as e:
@@ -170,10 +167,6 @@ def call_llama_guard_api(text: str) -> Dict[str, Any]:
         return {"flagged": True, "category": f"Llama Guard API JSON Error: {e}"}
 
 def hard_filter_stage(input_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    LangChain Runnable for Stage 1: Hard Filter.
-    Raises an error if content is flagged by the Llama Guard API.
-    """
     user_input = input_data["question"]
     st.write(f"**Stage 1: Running Hard Filter (Llama Guard via OpenRouter)**")
     moderation_result = call_llama_guard_api(user_input)
@@ -188,23 +181,17 @@ def hard_filter_stage(input_data: Dict[str, Any]) -> Dict[str, Any]:
 # --- Stage 2: Soft Classifier (Fine-tuned DistilBert) ---
 
 def soft_classifier_stage(input_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    LangChain Runnable for Stage 2: Soft Classifier using fine-tuned DistilBert.
-    Predicts one of the nine moderation categories and attaches it to the input.
-    """
     user_input = input_data["question"]
     st.write(f"**Stage 2: Running Soft Classifier (Fine-tuned DistilBert)**")
 
-    # Text preprocessing consistent with training
     encoded_input = tokenizer(
         user_input,
         truncation=True,
         padding='max_length',
-        max_length=128, # Same max_length as training
+        max_length=128,
         return_tensors='pt'
     ).to(device)
 
-    # Make the prediction
     with torch.no_grad():
         outputs = soft_classifier_model(**encoded_input)
         logits = outputs.logits
@@ -225,12 +212,8 @@ def soft_classifier_stage(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
 # --- BLIP Captioning Function ---
 def generate_caption(image: Image.Image) -> str:
-    """
-    Generates a caption for a given PIL Image using the BLIP model.
-    """
     st.write("Generating image caption...")
     try:
-        # Conditional image processing based on mode
         if image.mode != "RGB":
             image = image.convert("RGB")
 
@@ -254,12 +237,11 @@ prompt = PromptTemplate(template=template, input_variables=["question"])
 llm_chain = LLMChain(prompt=prompt, llm=llm_main_qa)
 
 # --- Dual-Stage Moderation Workflow + Main LLM Chain ---
-# This chain will be invoked with {"question": user_input_or_caption}
 full_moderation_and_qa_chain = (
     RunnablePassthrough.assign(question=lambda x: x["question"])
     | RunnableLambda(hard_filter_stage)
     | RunnableLambda(soft_classifier_stage)
-    | llm_chain # The final LLM for Q&A
+    | llm_chain
 )
 
 # --- Streamlit UI ---
@@ -288,7 +270,6 @@ if st.button("🚀 Process Input") and content_to_moderate:
     st.subheader("Moderation Results:")
     try:
         with st.spinner("Running moderation pipeline..."):
-            # The chain expects a dictionary with 'question'
             final_result = full_moderation_and_qa_chain.invoke({"question": content_to_moderate})
 
         st.success("Content passed all moderation stages!")
@@ -297,7 +278,7 @@ if st.button("🚀 Process Input") and content_to_moderate:
         st.json(final_result["soft_classification"])
         st.write("---")
         st.subheader("LLM Answer:")
-        st.info(final_result["text"]) # Assuming the LLMChain output key is 'text'
+        st.info(final_result["text"])
 
     except ValueError as e:
         st.error(f"**🚫 Moderation Blocked:** {e}")
@@ -305,3 +286,4 @@ if st.button("🚀 Process Input") and content_to_moderate:
         st.exception(f"An unexpected error occurred during processing: {e}")
 elif st.button("🚀 Process Input") and not content_to_moderate:
     st.warning("Please enter some text or upload an image to process.")
+

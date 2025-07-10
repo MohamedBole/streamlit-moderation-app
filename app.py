@@ -4,7 +4,6 @@ import json
 import torch
 import streamlit as st
 from PIL import Image # For image processing
-from google.colab import userdata
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification, BlipProcessor, BlipForConditionalGeneration
 from peft import PeftModel
 from langchain_openai import ChatOpenAI
@@ -90,7 +89,7 @@ blip_processor, blip_model = load_blip_model()
 
 # Retrieve API Keys from Colab Secrets
 try:
-    openrouter_api_key = userdata.get("OPENROUTER_API_KEY")
+    openrouter_api_key = st.secrets.get()("OPENROUTER_API_KEY")
     # It's crucial to strip any whitespace/newline characters that might be appended
     os.environ["OPENROUTER_API_KEY"] = openrouter_api_key.strip()
     st.success("OpenRouter API Key loaded from Colab Secrets.")
